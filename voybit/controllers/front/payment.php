@@ -72,17 +72,17 @@ class VoybitPaymentModuleFrontController extends ModuleFrontController
             // Kept in English so a retry sends the same body as the first request.
             $description = substr('Order ' . $order->reference, 0, 500);
             try {
-                $payment = VoybitApi::createPayment([
-                    'asset_id' => $this->module->assetId(),
-                    'crypto_amount' => $priced['crypto_amount'],
-                    'amount_minor' => $priced['amount_minor'],
+                $payment = VoybitApi::createCheckoutSession([
+                    'fiat_amount' => $priced['fiat_amount'],
                     'fiat_currency' => $priced['fiat_currency'],
                     'description' => $description,
                     'metadata' => [
+                        'cms' => 'prestashop',
                         'order_id' => (string) (int) $order->id,
                         'cart_id' => (string) $cartId,
                     ],
-                ], $this->module->apiKey(), $idempotencyKey);
+                    'payment_window_seconds' => VoybitApi::PAYMENT_WINDOW_SECONDS,
+                ], $this->module->apiKey(), $idempotencyKey, $this->module->apiBase());
             } catch (VoybitApiException $error) {
                 $this->module->logFailure((int) $order->id, $error->errorCode);
                 $this->module->addPrivateNote(
@@ -95,7 +95,7 @@ class VoybitPaymentModuleFrontController extends ModuleFrontController
             $saved = VoybitStorage::save(
                 $cartId,
                 (int) $order->id,
-                $payment['id'],
+                $payment['session_id'],
                 $payment['public_id'],
                 $payment['checkout_url'],
                 $payment['expires_at']

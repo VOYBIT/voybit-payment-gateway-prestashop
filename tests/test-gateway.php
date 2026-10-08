@@ -16,21 +16,17 @@ function voybit_prestashop_assert($condition, $message)
 }
 
 $usd = VoybitAmount::from('25.00', 'usd');
-voybit_prestashop_assert(2500 === $usd['amount_minor'], 'usd minor');
-voybit_prestashop_assert('25.00' === $usd['crypto_amount'], 'usd crypto');
+voybit_prestashop_assert('25.00' === $usd['fiat_amount'], 'usd amount');
 voybit_prestashop_assert('USD' === $usd['fiat_currency'], 'usd code');
 
 $jpy = VoybitAmount::from('25', 'JPY');
-voybit_prestashop_assert(25 === $jpy['amount_minor'], 'jpy minor');
-voybit_prestashop_assert('25' === $jpy['crypto_amount'], 'jpy crypto');
+voybit_prestashop_assert('25' === $jpy['fiat_amount'], 'jpy amount');
 
 $bhd = VoybitAmount::from('1.234', 'BHD');
-voybit_prestashop_assert(1234 === $bhd['amount_minor'], 'bhd minor');
-voybit_prestashop_assert('1.234' === $bhd['crypto_amount'], 'bhd crypto');
+voybit_prestashop_assert('1.234' === $bhd['fiat_amount'], 'bhd amount');
 
 $zeroTail = VoybitAmount::from('25.5000', 'USD');
-voybit_prestashop_assert(2550 === $zeroTail['amount_minor'], 'trailing zero minor');
-voybit_prestashop_assert('25.50' === $zeroTail['crypto_amount'], 'trailing zero crypto');
+voybit_prestashop_assert('25.50' === $zeroTail['fiat_amount'], 'trailing zero amount');
 
 foreach (['25.501', '0.00', '0', '-1.00', 'USD', '25.00'] as $bad) {
     $threw = false;

@@ -26,16 +26,103 @@ class VoybitApiException extends Exception
 
 class VoybitApi
 {
-    const ENDPOINT = 'https://api.voybit.com/api/v1/gateway/payments';
+    const DEFAULT_API_BASE = 'https://api.voybit.com/api';
+    const PAYMENT_WINDOW_SECONDS = 900;
+
+    /**
+     * @param string $apiBase
+     * @param string $apiKey
+     * @param string $webhookUrl
+     * @param string $returnUrl
+     *
+     * @return string Rotated webhook secret.
+     */
+    public static function configure($apiBase, $apiKey, $webhookUrl, $returnUrl)
+    {
+        $base = self::normalizeBase($apiBase);
+        if ($base === '' || !self::validHttpsUrl($webhookUrl) || !self::validHttpsUrl($returnUrl)) {
+            throw new VoybitApiException('configuration_url');
+        }
+        $response = self::request(
+            $base . '/v1/gateway/integration/configure',
+            [
+                'webhook_url' => (string) $webhookUrl,
+                'return_url' => (string) $returnUrl,
+            ],
+            $apiKey,
+            ''
+        );
+        $secret = isset($response['webhook_secret']) ? trim((string) $response['webhook_secret']) : '';
+        if (!preg_match('/^[A-Za-z0-9._:-]{8,256}$/', $secret)) {
+            throw new VoybitApiException('configuration_response');
+        }
+
+        return $secret;
+    }
 
     /**
      * @param array<string, mixed> $payload
      * @param string $apiKey
      * @param string $idempotencyKey
+     * @param string $apiBase
      *
-     * @return array{id: string, public_id: string, checkout_url: string, expires_at: int}
+     * @return array{session_id: string, public_id: string, checkout_url: string, expires_at: int}
      */
-    public static function createPayment(array $payload, $apiKey, $idempotencyKey)
+    public static function createCheckoutSession(array $payload, $apiKey, $idempotencyKey, $apiBase)
+    {
+        $base = self::normalizeBase($apiBase);
+        if ($base === '') {
+            throw new VoybitApiException('api_base');
+        }
+
+        return self::accepted(self::request(
+            $base . '/v1/gateway/checkout-sessions',
+            $payload,
+            $apiKey,
+            $idempotencyKey
+        ));
+    }
+
+    /**
+     * @param string $apiBase
+     *
+     * @return string
+     */
+    public static function normalizeBase($apiBase)
+    {
+        $parts = parse_url(trim((string) $apiBase));
+        if (!is_array($parts)
+            || !isset($parts['scheme'], $parts['host'])
+            || strtolower((string) $parts['scheme']) !== 'https'
+            || (string) $parts['host'] === ''
+            || isset($parts['user'])
+            || isset($parts['pass'])
+            || isset($parts['query'])
+            || isset($parts['fragment'])
+        ) {
+            return '';
+        }
+        $port = isset($parts['port']) ? (int) $parts['port'] : 0;
+        if ($port < 0 || $port > 65535) {
+            return '';
+        }
+        $path = isset($parts['path']) ? rtrim((string) $parts['path'], '/') : '';
+        if (preg_match('/[\x00-\x20\x7f]/', $path)) {
+            return '';
+        }
+
+        return 'https://' . strtolower((string) $parts['host']) . ($port ? ':' . $port : '') . $path;
+    }
+
+    /**
+     * @param string $endpoint
+     * @param array<string, mixed> $payload
+     * @param string $apiKey
+     * @param string $idempotencyKey
+     *
+     * @return array<string, mixed>
+     */
+    private static function request($endpoint, array $payload, $apiKey, $idempotencyKey)
     {
         $body = json_encode($payload);
         if (!is_string($body) || $body === '') {
@@ -44,7 +131,7 @@ class VoybitApi
 
         $lastCode = 'transport';
         for ($attempt = 0; $attempt < 4; ++$attempt) {
-            $result = self::post($body, $apiKey, $idempotencyKey);
+            $result = self::post($endpoint, $body, $apiKey, $idempotencyKey);
             if ($result['transport']) {
                 $lastCode = 'transport';
                 if ($attempt === 3) {
@@ -61,7 +148,7 @@ class VoybitApi
                     throw new VoybitApiException('invalid_response');
                 }
 
-                return self::accepted($decoded);
+                return $decoded;
             }
 
             $lastCode = is_array($decoded) && isset($decoded['error']['code']) ? (string) $decoded['error']['code'] : 'http_' . $status;
@@ -89,26 +176,29 @@ class VoybitApi
     /**
      * @param array<string, mixed> $data
      *
-     * @return array{id: string, public_id: string, checkout_url: string, expires_at: int}
+     * @return array{session_id: string, public_id: string, checkout_url: string, expires_at: int}
      */
     private static function accepted(array $data)
     {
-        $paymentId = isset($data['id']) ? strtolower((string) $data['id']) : '';
+        $sessionId = isset($data['session_id']) ? strtolower((string) $data['session_id']) : '';
         $checkoutUrl = VoybitCheckout::canonical(isset($data['checkout_url']) ? (string) $data['checkout_url'] : '');
         $publicId = isset($data['public_id']) ? (string) $data['public_id'] : '';
         $fromUrl = $checkoutUrl !== '' ? substr($checkoutUrl, strlen('https://voybit.com/pay/')) : '';
+        if ($publicId === '') {
+            $publicId = $fromUrl;
+        }
         $idsMatch = $fromUrl !== '' && strlen($fromUrl) === strlen($publicId) && hash_equals($fromUrl, $publicId);
-        if (!VoybitAmount::validUuid($paymentId) || !$idsMatch) {
+        if (!VoybitAmount::validUuid($sessionId) || !$idsMatch) {
             throw new VoybitApiException('invalid_checkout');
         }
 
         $expires = isset($data['expires_at']) ? strtotime((string) $data['expires_at']) : false;
         if (!is_int($expires) || $expires <= time()) {
-            throw new VoybitApiException('expired');
+            $expires = time() + self::PAYMENT_WINDOW_SECONDS;
         }
 
         return [
-            'id' => $paymentId,
+            'session_id' => $sessionId,
             'public_id' => $publicId,
             'checkout_url' => $checkoutUrl,
             'expires_at' => $expires,
@@ -116,19 +206,29 @@ class VoybitApi
     }
 
     /**
+     * @param string $endpoint
      * @param string $body
      * @param string $apiKey
      * @param string $idempotencyKey
      *
      * @return array{transport: bool, status: int, body: string, retry_after: int}
      */
-    private static function post($body, $apiKey, $idempotencyKey)
+    private static function post($endpoint, $body, $apiKey, $idempotencyKey)
     {
         if (!function_exists('curl_init')) {
             return ['transport' => true, 'status' => 0, 'body' => '', 'retry_after' => 0];
         }
 
-        $handle = curl_init(self::ENDPOINT);
+        $headers = [
+            'X-Voybit-Api-Key: ' . $apiKey,
+            'Content-Type: application/json',
+            'Accept: application/json',
+            'User-Agent: voybit-prestashop/1.1.0',
+        ];
+        if ($idempotencyKey !== '') {
+            $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
+        }
+        $handle = curl_init($endpoint);
         curl_setopt_array($handle, [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $body,
@@ -138,13 +238,7 @@ class VoybitApi
             CURLOPT_TIMEOUT => 20,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_HTTPHEADER => [
-                'X-Voybit-Api-Key: ' . $apiKey,
-                'Idempotency-Key: ' . $idempotencyKey,
-                'Content-Type: application/json',
-                'Accept: application/json',
-                'User-Agent: voybit-prestashop/1.0.0',
-            ],
+            CURLOPT_HTTPHEADER => $headers,
         ]);
         $raw = curl_exec($handle);
         if ($raw === false) {
@@ -169,5 +263,22 @@ class VoybitApi
             'body' => $payload,
             'retry_after' => $retryAfter,
         ];
+    }
+
+    /**
+     * @param string $url
+     *
+     * @return bool
+     */
+    private static function validHttpsUrl($url)
+    {
+        $parts = parse_url(trim((string) $url));
+
+        return is_array($parts)
+            && isset($parts['scheme'], $parts['host'])
+            && strtolower((string) $parts['scheme']) === 'https'
+            && (string) $parts['host'] !== ''
+            && !isset($parts['user'])
+            && !isset($parts['pass']);
     }
 }

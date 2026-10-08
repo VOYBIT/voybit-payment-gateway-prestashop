@@ -47,6 +47,9 @@ class VoybitWebhookModuleFrontController extends ModuleFrontController
         if (!VoybitAmount::validUuid($paymentId)) {
             $this->respond(400);
         }
+        $sessionId = isset($event['checkout_session_id'])
+            ? strtolower((string) $event['checkout_session_id'])
+            : (isset($event['session_id']) ? strtolower((string) $event['session_id']) : '');
 
         $status = isset($event['status']) ? (string) $event['status'] : '';
         $fulfil = $status === 'paid' || $status === 'overpaid';
@@ -56,8 +59,18 @@ class VoybitWebhookModuleFrontController extends ModuleFrontController
         }
 
         try {
-            $row = VoybitStorage::findByPaymentId($paymentId);
+            $row = VoybitAmount::validUuid($sessionId)
+                ? VoybitStorage::findBySessionId($sessionId)
+                : null;
+            if (!$row) {
+                $row = VoybitStorage::findByPaymentId($paymentId);
+            }
             if (!$row && $fulfil) {
+                $this->respond(503);
+            }
+            if ($row && (string) $row['payment_id'] === ''
+                && !VoybitStorage::attachPayment((int) $row['id_cart'], $paymentId)
+            ) {
                 $this->respond(503);
             }
             if ($row && VoybitStorage::alreadySeen((int) $row['id_cart'], $webhookId)) {
@@ -83,7 +96,9 @@ class VoybitWebhookModuleFrontController extends ModuleFrontController
      */
     private function fulfil(array $row, array $event)
     {
-        $publicId = isset($event['public_id']) ? (string) $event['public_id'] : '';
+        $publicId = isset($event['checkout_public_id'])
+            ? (string) $event['checkout_public_id']
+            : (isset($event['public_id']) ? (string) $event['public_id'] : '');
         $stored = (string) $row['public_id'];
         $orders = Db::getInstance()->executeS(
             'SELECT `id_order` FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_cart` = ' . (int) $row['id_cart']

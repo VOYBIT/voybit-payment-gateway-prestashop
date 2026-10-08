@@ -24,7 +24,7 @@ class VoybitAmount
      * @param string $amount
      * @param string $currency
      *
-     * @return array{amount_minor: int, crypto_amount: string, fiat_currency: string}
+     * @return array{fiat_amount: string, fiat_currency: string}
      */
     public static function from($amount, $currency)
     {
@@ -58,8 +58,7 @@ class VoybitAmount
         }
 
         return [
-            'amount_minor' => $value,
-            'crypto_amount' => $exponent === 0 ? $whole : $whole . '.' . $fraction,
+            'fiat_amount' => $exponent === 0 ? $whole : $whole . '.' . $fraction,
             'fiat_currency' => $currency,
         ];
     }

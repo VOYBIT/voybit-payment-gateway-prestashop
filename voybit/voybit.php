@@ -24,7 +24,7 @@ class Voybit extends PaymentModule
     {
         $this->name = 'voybit';
         $this->tab = 'payments_gateways';
-        $this->version = '1.0.0';
+        $this->version = '1.1.0';
         $this->author = 'Voybit';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -42,7 +42,7 @@ class Voybit extends PaymentModule
         $this->description = $this->l('Customers pay on the Voybit page. The store confirms the order when the payment arrives.');
         $this->confirmUninstall = $this->l('Remove Voybit settings from this shop? Orders already placed are kept.');
         if ($this->active && (!$this->hasCredentials() || !(bool) Configuration::get('PS_SSL_ENABLED'))) {
-            $this->warning = $this->l('Enter the API key, webhook secret, and asset ID. The shop must use HTTPS.');
+            $this->warning = $this->l('Save a valid API key so Voybit can configure this HTTPS shop.');
         }
     }
 
@@ -62,13 +62,41 @@ class Voybit extends PaymentModule
             'VOYBIT_CHECKOUT_TEXT',
             'You pay on the Voybit page. The store confirms the order when the payment arrives.'
         );
+        Configuration::updateValue('VOYBIT_API_BASE', VoybitApi::DEFAULT_API_BASE);
+
+        return true;
+    }
+
+    /**
+     * Enabling is never blocked by missing credentials or a temporary API failure.
+     *
+     * @param bool $forceAll
+     *
+     * @return bool
+     */
+    public function enable($forceAll = false)
+    {
+        if (!parent::enable($forceAll)) {
+            return false;
+        }
+        if ($this->apiKey() !== '') {
+            $this->configureIntegration(false);
+        }
 
         return true;
     }
 
     public function uninstall()
     {
-        $keys = ['VOYBIT_API_KEY', 'VOYBIT_WEBHOOK_SECRET', 'VOYBIT_ASSET_ID', 'VOYBIT_CHECKOUT_TITLE', 'VOYBIT_CHECKOUT_TEXT'];
+        $keys = [
+            'VOYBIT_API_KEY',
+            'VOYBIT_API_BASE',
+            'VOYBIT_WEBHOOK_SECRET',
+            'VOYBIT_ASSET_ID',
+            'VOYBIT_CONFIG_ERROR',
+            'VOYBIT_CHECKOUT_TITLE',
+            'VOYBIT_CHECKOUT_TEXT',
+        ];
         foreach ($keys as $key) {
             if (!Configuration::deleteByName($key)) {
                 return false;
@@ -88,13 +116,13 @@ class Voybit extends PaymentModule
             $html .= $this->saveConfiguration();
         }
 
-        $this->context->smarty->assign([
-            'voybit_webhook_url' => $this->webhookUrl(),
-            'voybit_return_url' => $this->returnUrl(),
-        ]);
         $html .= $this->display(__FILE__, 'admin/configure.tpl');
+        $setupError = trim((string) Configuration::get('VOYBIT_CONFIG_ERROR'));
+        if ($setupError !== '') {
+            $html .= $this->displayError($this->configurationMessage($setupError));
+        }
         if (!$this->shopUsesHttps()) {
-            $html .= $this->displayWarning($this->l('Voybit needs the shop to use HTTPS. Enable SSL, then copy the addresses below into the Voybit gateway.'));
+            $html .= $this->displayWarning($this->l('Voybit needs the shop to use HTTPS before automatic integration setup can complete.'));
         }
         $html .= $this->renderForm();
 
@@ -151,8 +179,7 @@ class Voybit extends PaymentModule
         return $this->active
             && $this->shopUsesHttps()
             && $this->apiKey() !== ''
-            && $this->webhookSecret() !== ''
-            && VoybitAmount::validUuid($this->assetId());
+            && $this->webhookSecret() !== '';
     }
 
     /**
@@ -174,9 +201,11 @@ class Voybit extends PaymentModule
     /**
      * @return string
      */
-    public function assetId()
+    public function apiBase()
     {
-        return strtolower(trim((string) Configuration::get('VOYBIT_ASSET_ID')));
+        $base = VoybitApi::normalizeBase((string) Configuration::get('VOYBIT_API_BASE'));
+
+        return $base !== '' ? $base : VoybitApi::DEFAULT_API_BASE;
     }
 
     /**
@@ -248,9 +277,6 @@ class Voybit extends PaymentModule
      */
     public function customerMessage($code)
     {
-        if ($code === 'crypto_amount_in_use') {
-            return $this->l('Another Voybit payment is already open for this amount. Wait a few minutes and try again.');
-        }
         if ($code === 'expired') {
             return $this->l('This Voybit payment has expired. Wait a few minutes and try again.');
         }
@@ -316,30 +342,25 @@ class Voybit extends PaymentModule
     private function saveConfiguration()
     {
         $errors = [];
+        $previousKey = $this->apiKey();
+        $previousBase = $this->apiBase();
+        $previousSecret = $this->webhookSecret();
         $apiKey = $this->postedString('VOYBIT_API_KEY');
         if ($apiKey !== '') {
             if (!preg_match('/^[A-Za-z0-9._:-]+$/', $apiKey) || strlen($apiKey) > 256) {
-                $errors[] = $this->l('The API key or webhook secret contains characters Voybit does not use. Paste the value from the Voybit dashboard.');
+                $errors[] = $this->l('The API key contains characters Voybit does not use. Paste the key from the Voybit dashboard.');
             } else {
                 Configuration::updateValue('VOYBIT_API_KEY', $apiKey);
             }
         }
 
-        $secret = $this->postedString('VOYBIT_WEBHOOK_SECRET');
-        if ($secret !== '') {
-            if (!preg_match('/^[A-Za-z0-9._:-]+$/', $secret) || strlen($secret) > 256) {
-                $errors[] = $this->l('The API key or webhook secret contains characters Voybit does not use. Paste the value from the Voybit dashboard.');
-            } else {
-                Configuration::updateValue('VOYBIT_WEBHOOK_SECRET', $secret);
-            }
-        }
-
-        $asset = strtolower($this->postedString('VOYBIT_ASSET_ID'));
-        if ($asset === '' || !VoybitAmount::validUuid($asset)) {
-            $errors[] = $this->l('Enter the asset ID shown on the Voybit gateway. It looks like a UUID.');
+        $base = VoybitApi::normalizeBase($this->postedString('VOYBIT_API_BASE'));
+        if ($base === '') {
+            $errors[] = $this->l('Enter a valid HTTPS Voybit API base URL.');
         } else {
-            Configuration::updateValue('VOYBIT_ASSET_ID', $asset);
+            Configuration::updateValue('VOYBIT_API_BASE', $base);
         }
+        Configuration::deleteByName('VOYBIT_ASSET_ID');
 
         $title = Tools::substr(trim(strip_tags($this->postedString('VOYBIT_CHECKOUT_TITLE'))), 0, 80);
         if ($title === '') {
@@ -350,20 +371,33 @@ class Voybit extends PaymentModule
         $text = Tools::substr(trim(strip_tags($this->postedString('VOYBIT_CHECKOUT_TEXT'))), 0, 300);
         Configuration::updateValue('VOYBIT_CHECKOUT_TEXT', $text);
 
-        if ($this->apiKey() === '' || $this->webhookSecret() === '') {
-            $errors[] = $this->l('Enter the API key and webhook secret from the Voybit dashboard. Leave a field blank only after a value is already saved.');
+        if ($this->apiKey() === '') {
+            $errors[] = $this->l('Enter the gateway-scoped API key from the Voybit dashboard.');
         }
 
         if ($errors) {
-            $html = '';
-            foreach ($errors as $error) {
-                $html .= $this->displayError($error);
-            }
-
-            return $html;
+            return $this->renderErrors($errors);
         }
 
-        return $this->displayConfirmation($this->l('Settings saved. An empty secret field keeps the saved value.'));
+        if (!$this->configureIntegration(false)) {
+            $code = (string) Configuration::get('VOYBIT_CONFIG_ERROR');
+            if ($previousKey !== '' && $previousSecret !== ''
+                && ($this->apiKey() !== $previousKey || $this->apiBase() !== $previousBase)
+            ) {
+                Configuration::updateValue('VOYBIT_API_KEY', $previousKey);
+                Configuration::updateValue('VOYBIT_API_BASE', $previousBase);
+                Configuration::updateValue('VOYBIT_WEBHOOK_SECRET', $previousSecret);
+                Configuration::deleteByName('VOYBIT_CONFIG_ERROR');
+                $errors[] = $this->configurationMessage($code);
+                $errors[] = $this->l('The previous working Voybit configuration was kept.');
+            } else {
+                $errors[] = $this->configurationMessage($code);
+            }
+
+            return $this->renderErrors($errors);
+        }
+
+        return $this->displayConfirmation($this->l('Settings saved. Voybit configured the webhook and customer return URL automatically.'));
     }
 
     /**
@@ -372,7 +406,6 @@ class Voybit extends PaymentModule
     private function renderForm()
     {
         $apiSaved = $this->apiKey() !== '';
-        $secretSaved = $this->webhookSecret() !== '';
         $fields = [
             'form' => [
                 'legend' => [
@@ -402,19 +435,10 @@ class Voybit extends PaymentModule
                         'autocomplete' => 'new-password',
                     ],
                     [
-                        'type' => 'password',
-                        'label' => $this->l('Webhook secret'),
-                        'name' => 'VOYBIT_WEBHOOK_SECRET',
-                        'desc' => $secretSaved
-                            ? $this->l('A secret is saved. Enter a new value to replace it, or leave this blank to keep it.')
-                            : $this->l('Secret shown once when you create the gateway.'),
-                        'autocomplete' => 'new-password',
-                    ],
-                    [
                         'type' => 'text',
-                        'label' => $this->l('Asset ID'),
-                        'name' => 'VOYBIT_ASSET_ID',
-                        'desc' => $this->l('Asset ID from the same Voybit gateway. A USD store should use a stablecoin such as USDT. The order total is the amount of that asset.'),
+                        'label' => $this->l('API base URL (advanced)'),
+                        'name' => 'VOYBIT_API_BASE',
+                        'desc' => $this->l('Keep the default unless Voybit support gives you another HTTPS API base URL.'),
                     ],
                 ],
                 'submit' => [
@@ -439,8 +463,7 @@ class Voybit extends PaymentModule
                 'VOYBIT_CHECKOUT_TITLE' => $this->checkoutTitle(),
                 'VOYBIT_CHECKOUT_TEXT' => $this->checkoutText(),
                 'VOYBIT_API_KEY' => '',
-                'VOYBIT_WEBHOOK_SECRET' => '',
-                'VOYBIT_ASSET_ID' => $this->assetId(),
+                'VOYBIT_API_BASE' => $this->apiBase(),
             ],
         ];
 
@@ -452,7 +475,82 @@ class Voybit extends PaymentModule
      */
     private function hasCredentials()
     {
-        return $this->apiKey() !== '' && $this->webhookSecret() !== '' && VoybitAmount::validUuid($this->assetId());
+        return $this->apiKey() !== '' && $this->webhookSecret() !== '';
+    }
+
+    /**
+     * Configure callbacks and securely keep the rotated secret internal.
+     *
+     * @param bool $unused Reserved for compatibility with activation calls.
+     *
+     * @return bool
+     */
+    public function configureIntegration($unused = false)
+    {
+        unset($unused);
+        if ($this->apiKey() === '') {
+            return true;
+        }
+        if (!$this->shopUsesHttps()) {
+            Configuration::updateValue('VOYBIT_CONFIG_ERROR', 'configuration_url');
+            return false;
+        }
+        try {
+            $secret = VoybitApi::configure(
+                $this->apiBase(),
+                $this->apiKey(),
+                $this->webhookUrl(),
+                $this->returnUrl()
+            );
+            Configuration::updateValue('VOYBIT_WEBHOOK_SECRET', $secret);
+            Configuration::deleteByName('VOYBIT_CONFIG_ERROR');
+
+            return true;
+        } catch (VoybitApiException $error) {
+            Configuration::updateValue('VOYBIT_CONFIG_ERROR', self::safeCode($error->errorCode));
+
+            return false;
+        } catch (Exception $error) {
+            Configuration::updateValue('VOYBIT_CONFIG_ERROR', 'transport');
+
+            return false;
+        }
+    }
+
+    /**
+     * @param string $code
+     *
+     * @return string
+     */
+    private function configurationMessage($code)
+    {
+        $safe = self::safeCode($code);
+        if ($safe === 'configuration_url') {
+            return $this->l('Voybit could not configure this shop because the webhook or return URL is not HTTPS. Enable SSL and save again.');
+        }
+        if ($safe === 'transport') {
+            return $this->l('Voybit could not be reached. Check the API base URL and try saving again.');
+        }
+
+        return sprintf(
+            $this->l('Voybit could not configure this shop (%s). Check the API key and API base URL, then save again.'),
+            $safe
+        );
+    }
+
+    /**
+     * @param string[] $errors
+     *
+     * @return string
+     */
+    private function renderErrors(array $errors)
+    {
+        $html = '';
+        foreach ($errors as $error) {
+            $html .= $this->displayError($error);
+        }
+
+        return $html;
     }
 
     /**

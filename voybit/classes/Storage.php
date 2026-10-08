@@ -19,16 +19,39 @@ class VoybitStorage
         $sql = 'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . 'voybit_payment` (
             `id_cart` INT UNSIGNED NOT NULL,
             `id_order` INT UNSIGNED NOT NULL,
-            `payment_id` CHAR(36) NOT NULL,
+            `session_id` CHAR(36) NULL,
+            `payment_id` CHAR(36) NULL,
             `public_id` VARCHAR(32) NOT NULL,
             `checkout_url` VARCHAR(255) NOT NULL,
             `expires_at` INT UNSIGNED NOT NULL DEFAULT 0,
             `webhook_ids` TEXT NULL,
             PRIMARY KEY (`id_cart`),
+            UNIQUE KEY `voybit_session_id` (`session_id`),
             UNIQUE KEY `voybit_payment_id` (`payment_id`)
         ) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4';
 
         return Db::getInstance()->execute($sql);
+    }
+
+    /**
+     * Add checkout-session storage without losing legacy payment links.
+     *
+     * @return bool
+     */
+    public static function upgrade()
+    {
+        if (!self::install()) {
+            return false;
+        }
+        $table = '`' . _DB_PREFIX_ . 'voybit_payment`';
+        $column = Db::getInstance()->getRow('SHOW COLUMNS FROM ' . $table . ' LIKE \'session_id\'');
+        if (!$column && !Db::getInstance()->execute(
+            'ALTER TABLE ' . $table . ' ADD `session_id` CHAR(36) NULL AFTER `id_order`, ADD UNIQUE KEY `voybit_session_id` (`session_id`)'
+        )) {
+            return false;
+        }
+
+        return Db::getInstance()->execute('ALTER TABLE ' . $table . ' MODIFY `payment_id` CHAR(36) NULL');
     }
 
     /**
@@ -39,9 +62,44 @@ class VoybitStorage
     public static function findByCart($cartId)
     {
         $row = Db::getInstance()->getRow(
-            'SELECT `id_cart`, `id_order`, `payment_id`, `public_id`, `checkout_url`, `expires_at`, `webhook_ids`
+            'SELECT `id_cart`, `id_order`, `session_id`, `payment_id`, `public_id`, `checkout_url`, `expires_at`, `webhook_ids`
             FROM `' . _DB_PREFIX_ . 'voybit_payment`
             WHERE `id_cart` = ' . (int) $cartId
+        );
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * @param int $orderId
+     *
+     * @return array<string, string>|null
+     */
+    public static function findByOrder($orderId)
+    {
+        $row = Db::getInstance()->getRow(
+            'SELECT `id_cart`, `id_order`, `session_id`, `payment_id`, `public_id`, `checkout_url`, `expires_at`, `webhook_ids`
+            FROM `' . _DB_PREFIX_ . 'voybit_payment`
+            WHERE `id_order` = ' . (int) $orderId
+        );
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * @param string $sessionId
+     *
+     * @return array<string, string>|null
+     */
+    public static function findBySessionId($sessionId)
+    {
+        if (!VoybitAmount::validUuid($sessionId)) {
+            return null;
+        }
+        $row = Db::getInstance()->getRow(
+            'SELECT `id_cart`, `id_order`, `session_id`, `payment_id`, `public_id`, `checkout_url`, `expires_at`, `webhook_ids`
+            FROM `' . _DB_PREFIX_ . 'voybit_payment`
+            WHERE `session_id` = \'' . pSQL($sessionId) . '\''
         );
 
         return is_array($row) ? $row : null;
@@ -58,7 +116,7 @@ class VoybitStorage
             return null;
         }
         $row = Db::getInstance()->getRow(
-            'SELECT `id_cart`, `id_order`, `payment_id`, `public_id`, `checkout_url`, `expires_at`, `webhook_ids`
+            'SELECT `id_cart`, `id_order`, `session_id`, `payment_id`, `public_id`, `checkout_url`, `expires_at`, `webhook_ids`
             FROM `' . _DB_PREFIX_ . 'voybit_payment`
             WHERE `payment_id` = \'' . pSQL($paymentId) . '\''
         );
@@ -69,19 +127,20 @@ class VoybitStorage
     /**
      * @param int $cartId
      * @param int $orderId
-     * @param string $paymentId
+     * @param string $sessionId
      * @param string $publicId
      * @param string $checkoutUrl
      * @param int $expiresAt
      *
      * @return bool
      */
-    public static function save($cartId, $orderId, $paymentId, $publicId, $checkoutUrl, $expiresAt)
+    public static function save($cartId, $orderId, $sessionId, $publicId, $checkoutUrl, $expiresAt)
     {
         $existing = self::findByCart($cartId);
         $data = [
             'id_order' => (int) $orderId,
-            'payment_id' => (string) $paymentId,
+            'session_id' => (string) $sessionId,
+            'payment_id' => null,
             'public_id' => (string) $publicId,
             'checkout_url' => (string) $checkoutUrl,
             'expires_at' => (int) $expiresAt,
@@ -93,6 +152,25 @@ class VoybitStorage
         $data['webhook_ids'] = '';
 
         return Db::getInstance()->insert('voybit_payment', $data);
+    }
+
+    /**
+     * Link the resulting payment UUID after a verified webhook arrives.
+     *
+     * @param int $cartId
+     * @param string $paymentId
+     *
+     * @return bool
+     */
+    public static function attachPayment($cartId, $paymentId)
+    {
+        if (!VoybitAmount::validUuid($paymentId)) {
+            return false;
+        }
+
+        return Db::getInstance()->update('voybit_payment', [
+            'payment_id' => (string) $paymentId,
+        ], '`id_cart` = ' . (int) $cartId);
     }
 
     /**

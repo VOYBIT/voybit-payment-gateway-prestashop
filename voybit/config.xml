@@ -2,7 +2,7 @@
 <module>
     <name>voybit</name>
     <displayName><![CDATA[Voybit]]></displayName>
-    <version><![CDATA[1.0.0]]></version>
+    <version><![CDATA[1.1.0]]></version>
     <description><![CDATA[Customers pay on the Voybit page. The store confirms the order when the payment arrives.]]></description>
     <author><![CDATA[Voybit]]></author>
     <tab><![CDATA[payments_gateways]]></tab>
